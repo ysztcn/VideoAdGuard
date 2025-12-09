@@ -4,6 +4,13 @@ import { WhitelistService } from './services/whitelist';
 import { AudioService } from './services/audio';
 import { CacheService } from './services/cache';
 
+// 新增：广告片段接口，用于支持交互状态
+interface AdSegment {
+  id: string;
+  start: number;
+  end: number;
+  active: boolean; // true=绿色/跳过, false=灰色/不跳过
+}
 
 export interface AdDetectionJSON {
   exist: boolean;
@@ -80,7 +87,8 @@ export function parseAdResult(raw: string, captionsLength = 0): AdDetectionJSON 
 
 class AdDetector {
   public static adDetectionResult: string | null = null; // 状态存储
-  private static adTimeRanges: number[][] = []; // 存储广告时间段
+  private static adTimeRanges: number[][] = []; // 存储广告时间段 (仅包含active=true的，兼容旧逻辑)
+  private static adSegments: AdSegment[] = []; // 新增：存储详细的广告片段状态 (支持交互)
   private static validIndexLists: number[][] = []; // 存储原始广告索引区间
   private static timeUpdateListener: (() => void) | null = null; // 用于存储 timeupdate 监听器的引用
   private static adMarkerLayer: HTMLElement | null = null; // 添加标记层引用
@@ -124,6 +132,7 @@ class AdDetector {
     // 重置所有静态变量
     this.adDetectionResult = null;
     this.adTimeRanges = [];
+    this.adSegments = []; // 重置片段
     this.validIndexLists = [];
 
     // 清理延时器
@@ -143,6 +152,34 @@ class AdDetector {
 
     // 移除事件监听器
     this.removeAutoSkipListener();
+  }
+
+  /**
+   * 将 adTimeRanges (纯时间数组) 初始化为 adSegments (带状态的对象数组)
+   */
+  private static initAdSegments(timeRanges: number[][]) {
+    this.adSegments = timeRanges.map((range, index) => ({
+      id: `ad-seg-${Date.now()}-${index}`,
+      start: range[0],
+      end: range[1],
+      active: true // 默认为激活状态
+    }));
+    // 同步回 adTimeRanges 确保一致
+    this.syncAdTimeRanges();
+  }
+
+  /**
+   * 根据 adSegments 的状态更新 adTimeRanges
+   * 只有 active 为 true 的片段才会进入 adTimeRanges 被自动跳过
+   */
+  private static syncAdTimeRanges() {
+    this.adTimeRanges = this.adSegments
+      .filter(seg => seg.active)
+      .map(seg => [seg.start, seg.end]);
+      
+    // 如果有自动跳过监听器，由于引用的 adTimeRanges 内容变了，逻辑会自动应用新范围
+    // 但为了确保日志和状态正确，打印一下
+    // console.log('【VideoAdGuard】同步广告区间:', this.adTimeRanges);
   }
 
 
@@ -168,11 +205,12 @@ class AdDetector {
       const cachedResult = await CacheService.getDetectionResult(bvid);
       if (cachedResult) {
         console.log('【VideoAdGuard】使用缓存的检测结果');
-        this.adTimeRanges = cachedResult.adTimeRanges;
+        // 初始化 segments
+        this.initAdSegments(cachedResult.adTimeRanges);
 
-        if (cachedResult.exist && cachedResult.adTimeRanges.length > 0) {
-          this.adDetectionResult = this.adDetectionResult = (this.adDetectionResult ? this.adDetectionResult + ' | ' : '') + `发现${cachedResult.adTimeRanges.length}处广告（缓存）：${
-            cachedResult.adTimeRanges.map(([start, end]) => `${this.second2time(start)}~${this.second2time(end)}`).join(' | ')
+        if (cachedResult.exist && this.adSegments.length > 0) {
+          this.adDetectionResult = this.adDetectionResult = (this.adDetectionResult ? this.adDetectionResult + ' | ' : '') + `发现${this.adSegments.length}处广告（缓存）：${
+            this.adSegments.map(seg => `${this.second2time(seg.start)}~${this.second2time(seg.end)}`).join(' | ')
           }`;
 
           // 获取video元素用于后续操作
@@ -444,7 +482,10 @@ class AdDetector {
           }
         }
         const second_lists = this.index2second(mergedIndexLists, captionsData.body);
-        this.adTimeRanges = second_lists;
+        
+        // 初始化 segments 并同步 timeRanges
+        this.initAdSegments(second_lists);
+
         this.adDetectionResult = (this.adDetectionResult ? this.adDetectionResult + ' | ' : '') + `发现${second_lists.length}处广告：${
           second_lists.map(([start, end]) => `${this.second2time(start)}~${this.second2time(end)}`).join(' | ')
         }`;
@@ -563,7 +604,9 @@ class AdDetector {
     this.createAdMarkersInternal(videoElement, progressWrap);
   }
 
-  // 内部创建广告标记的实际逻辑
+  /**
+   * 内部创建广告标记的实际逻辑 (增强版：支持点击切换、拖动、调整大小)
+   */
   private static createAdMarkersInternal(videoElement: HTMLVideoElement, progressWrap: Element): void {
     // 创建广告标记层
     const adMarkerLayer = document.createElement('div');
@@ -574,7 +617,7 @@ class AdDetector {
       left: 0;
       width: 100%;
       height: 5px;
-      pointer-events: none;
+      pointer-events: none; 
       z-index: 30;
     `;
 
@@ -584,35 +627,152 @@ class AdDetector {
     // 将广告标记层添加到进度条容器
     progressWrap.appendChild(adMarkerLayer);
 
+    const updateMarkerVisual = (marker: HTMLElement, segment: AdSegment, duration: number) => {
+      const startPercent = (segment.start / duration) * 100;
+      const endPercent = (segment.end / duration) * 100;
+      marker.style.left = `${startPercent}%`;
+      marker.style.width = `${endPercent - startPercent}%`;
+      marker.style.backgroundColor = segment.active ? '#4CAF50' : '#808080'; // 绿色 / 灰色
+      marker.style.opacity = segment.active ? '1' : '0.6';
+    };
+
     // 为每个广告位置创建标记
-    if (this.adTimeRanges && this.adTimeRanges.length > 0) {
-      // 计算广告位置百分比
+    if (this.adSegments && this.adSegments.length > 0) {
       const duration = videoElement.duration || 1; // 防止除以0
 
-      this.adTimeRanges.forEach(([start, end]) => {
-        // 计算位置百分比
-        const startPercent = (start / duration) * 100;
-        const endPercent = (end / duration) * 100;
-
-        // 创建标记元素
+      this.adSegments.forEach((segment) => {
         const marker = document.createElement('div');
         marker.className = 'ad-position-marker10032';
+        marker.title = "点击切换跳过状态 | 拖动调整位置 | 边缘调整大小";
+        // 初始样式
         marker.style.cssText = `
           position: absolute;
-          top: 0;
-          left: ${startPercent}%;
-          width: ${endPercent - startPercent}%;
-          height: 100%;
-          background-color: #4CAF50;
-          opacity: 1;
+          top: -2px; /* 稍微大一点方便点击 */
+          height: 200%; /* 增加点击区域高度 */
           border-radius: 1px;
+          cursor: pointer;
+          pointer-events: auto; /* 允许交互 */
+          transition: background-color 0.2s;
+          box-shadow: 0 0 1px rgba(0,0,0,0.5);
+          min-width: 4px; /* 最小宽度 */
         `;
+        
+        // 设置初始位置和颜色
+        updateMarkerVisual(marker, segment, duration);
 
+        // 创建调整手柄 (左侧)
+        const leftHandle = document.createElement('div');
+        leftHandle.style.cssText = `position: absolute; left: -3px; top: 0; width: 6px; height: 100%; cursor: w-resize; z-index: 2;`;
+        marker.appendChild(leftHandle);
+
+        // 创建调整手柄 (右侧)
+        const rightHandle = document.createElement('div');
+        rightHandle.style.cssText = `position: absolute; right: -3px; top: 0; width: 6px; height: 100%; cursor: e-resize; z-index: 2;`;
+        marker.appendChild(rightHandle);
+
+        // 交互逻辑变量
+        let startX = 0;
+        let initialStart = 0;
+        let initialEnd = 0;
+        let isDragging = false;
+        let mode: 'move' | 'resize-left' | 'resize-right' | null = null;
+
+        // 鼠标按下事件
+        const onMouseDown = (e: MouseEvent) => {
+          e.preventDefault();
+          e.stopPropagation(); // 防止触发进度条跳转
+          startX = e.clientX;
+          initialStart = segment.start;
+          initialEnd = segment.end;
+          isDragging = false; // 初始假设为点击，如果移动了则改为拖拽
+
+          // 判断点击位置确定模式
+          if (e.target === leftHandle) {
+            mode = 'resize-left';
+          } else if (e.target === rightHandle) {
+            mode = 'resize-right';
+          } else {
+            mode = 'move';
+            marker.style.cursor = 'grabbing';
+          }
+
+          document.addEventListener('mousemove', onMouseMove);
+          document.addEventListener('mouseup', onMouseUp);
+        };
+
+        const onMouseMove = (e: MouseEvent) => {
+          if (!mode) return;
+
+          const deltaX = e.clientX - startX;
+          // 只有移动超过一定距离才视为拖拽
+          if (Math.abs(deltaX) > 2) {
+            isDragging = true;
+          }
+
+          // 计算像素到秒的转换
+          const rect = adMarkerLayer.getBoundingClientRect();
+          if (rect.width === 0) return;
+          const deltaSeconds = (deltaX / rect.width) * duration;
+
+          if (mode === 'move') {
+            // 移动：同时改变 start 和 end，保持时长不变
+            let newStart = initialStart + deltaSeconds;
+            let newEnd = initialEnd + deltaSeconds;
+            const len = initialEnd - initialStart;
+
+            // 边界检查
+            if (newStart < 0) { newStart = 0; newEnd = len; }
+            if (newEnd > duration) { newEnd = duration; newStart = duration - len; }
+
+            segment.start = newStart;
+            segment.end = newEnd;
+
+          } else if (mode === 'resize-left') {
+            // 左侧调整：改变 start
+            let newStart = initialStart + deltaSeconds;
+            // 限制：不能小于0，不能大于当前end
+            if (newStart < 0) newStart = 0;
+            if (newStart > segment.end - 0.5) newStart = segment.end - 0.5; // 保持最小间隔
+            segment.start = newStart;
+
+          } else if (mode === 'resize-right') {
+            // 右侧调整：改变 end
+            let newEnd = initialEnd + deltaSeconds;
+            // 限制：不能小于当前start，不能大于duration
+            if (newEnd > duration) newEnd = duration;
+            if (newEnd < segment.start + 0.5) newEnd = segment.start + 0.5;
+            segment.end = newEnd;
+          }
+
+          // 实时更新UI
+          updateMarkerVisual(marker, segment, duration);
+        };
+
+        const onMouseUp = (_e: MouseEvent) => {
+          document.removeEventListener('mousemove', onMouseMove);
+          document.removeEventListener('mouseup', onMouseUp);
+          marker.style.cursor = 'pointer';
+
+          if (!isDragging) {
+            // 如果没有发生拖拽，则视为点击，切换激活状态
+            segment.active = !segment.active;
+            updateMarkerVisual(marker, segment, duration);
+            console.log(`【VideoAdGuard】切换广告段状态: ${segment.active ? '开启' : '关闭'}`);
+          } else {
+             console.log(`【VideoAdGuard】调整广告段完成: ${this.second2time(segment.start)} - ${this.second2time(segment.end)}`);
+          }
+          
+          mode = null;
+          // 操作结束后，同步数据到 adTimeRanges，这会立即影响 autoSkip 逻辑
+          this.syncAdTimeRanges();
+        };
+
+        marker.addEventListener('mousedown', onMouseDown);
         adMarkerLayer.appendChild(marker);
       });
     }
 
-    console.log('【VideoAdGuard】已创建广告标记层');
+    console.log('【VideoAdGuard】已创建交互式广告标记层');
   }
   
   // 添加：移除广告标记层的方法
@@ -804,6 +964,7 @@ class AdDetector {
     skipButton.addEventListener('click', () => {
       const currentTime = videoElement.currentTime;
       console.log('【VideoAdGuard】当前时间:', currentTime);
+      // 查找当前是否在某个活跃广告段内
       const adSegment = this.adTimeRanges.find(([start, end]) =>
         currentTime >= Math.max(start-10,0) && currentTime < end
       );
@@ -847,8 +1008,9 @@ class AdDetector {
         lastCheckTime = now;
         const currentTime = videoElement.currentTime;
 
+        // 注意：adTimeRanges 现在是动态更新的，仅包含 active=true 的段
         for (const [start, end] of this.adTimeRanges) {
-          // 生成当前区间的唯一标识
+          // 生成当前区间的唯一标识 (使用时间组合，虽然可能变化，但在跳跃瞬间是稳定的)
           const rangeKey = `${start}-${end}`;
 
           // 检查是否即将进入广告区间（前3秒）
@@ -873,11 +1035,7 @@ class AdDetector {
               skippedRanges.add(rangeKey);
 
               // 检查是否所有区间都已经跳过
-              const allSkipped = this.adTimeRanges.every(([s, e]) => skippedRanges.has(`${s}-${e}`));
-              if (allSkipped) {
-                  console.log('【VideoAdGuard】所有广告区间都已跳过，移除监听器');
-                  this.removeAutoSkipListener();
-              }
+              // 注意：如果用户动态开启了新区间，这个判断会在下一次循环中处理
               break;
           }
         }
