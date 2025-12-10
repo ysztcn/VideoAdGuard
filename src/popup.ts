@@ -22,6 +22,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   const apiUrlDropdown = document.getElementById("apiUrlDropdown") as HTMLButtonElement;
   const apiUrlDropdownMenu = document.getElementById("apiUrlDropdownMenu") as HTMLDivElement;
 
+  // 默认勾选启用和自动跳过广告，若读取到存储值会覆盖
+  enableExtensionCheckbox.checked = true;
+  autoSkipAdCheckbox.checked = true;
+
   // 自动保存函数
   async function autoSaveSettings() {
     const apiUrl = apiUrlInput.value.trim();
@@ -33,22 +37,19 @@ document.addEventListener("DOMContentLoaded", async () => {
     const restrictedMode = restrictedModeCheckbox.checked;
     const groqApiKey = groqApiKeyInput.value.trim();
     const enableAudioTranscription = enableAudioTranscriptionCheckbox.checked;
-  const enableGroqProxy = enableAudioTranscription && enableGroqProxyCheckbox ? enableGroqProxyCheckbox.checked : false;
+    const enableGroqProxy = enableAudioTranscription && enableGroqProxyCheckbox ? enableGroqProxyCheckbox.checked : false;
 
     // 基本验证
     if (!apiUrl) {
       console.warn('API地址为空');
-      return;
     }
 
     if (!enableLocalOllama && !apiKey) {
       console.warn('API密钥为空');
-      return;
     }
 
     if (!model) {
       console.warn('模型名称为空');
-      return;
     }
 
     try {
@@ -69,15 +70,66 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
-  // 页面卸载时自动保存
+  // ========== 统一的事件绑定：所有输入框和复选框变化时立即保存 ==========
+  
+  // 所有复选框 - change 事件立即保存
+  const allCheckboxes = [
+    enableExtensionCheckbox,
+    autoSkipAdCheckbox,
+    restrictedModeCheckbox,
+    localOllamaCheckbox,
+    enableAudioTranscriptionCheckbox,
+    enableGroqProxyCheckbox
+  ].filter(Boolean); // 过滤掉可能不存在的元素
+
+  allCheckboxes.forEach(checkbox => {
+    checkbox.addEventListener('change', () => {
+      autoSaveSettings();
+    });
+  });
+
+  // 所有文本输入框 - input 事件实时保存 + blur 事件兜底保存
+  const allTextInputs = [
+    apiUrlInput,
+    apiKeyInput,
+    modelInput,
+    groqApiKeyInput
+  ].filter(Boolean);
+
+  allTextInputs.forEach(input => {
+    // 输入时实时保存（带防抖）
+    let debounceTimer: number | null = null;
+    input.addEventListener('input', () => {
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+      }
+      debounceTimer = window.setTimeout(() => {
+        autoSaveSettings();
+      }, 500); // 500ms 防抖
+    });
+
+    // 失去焦点时立即保存（兜底）
+    input.addEventListener('blur', () => {
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+        debounceTimer = null;
+      }
+      autoSaveSettings();
+    });
+  });
+
+  // 页面卸载时自动保存（兜底）
   window.addEventListener('beforeunload', autoSaveSettings);
 
-  // 页面隐藏时自动保存（用户切换标签页或关闭popup）
+  // 页面隐藏时自动保存（用户切换标签页或关闭popup，兜底）
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       autoSaveSettings();
     }
   });
+
+  // 窗口失去焦点时保存（额外兜底，针对 Mac 等平台）
+  window.addEventListener('blur', autoSaveSettings);
 
   // API URL 下拉框功能
   function initApiUrlDropdown() {
@@ -133,17 +185,16 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
   }
 
-  localOllamaCheckbox.addEventListener('change', toggleOllamaField);
-  function toggleOllamaField(e: Event) {
+  // Ollama 复选框的额外逻辑：切换 CSS 类
+  localOllamaCheckbox.addEventListener('change', (e: Event) => {
     const target = e.target as HTMLInputElement;
-    
     // 使用CSS类来控制显示/隐藏，而不是直接修改display属性
     if (target.checked) {
       document.body.classList.add('ollama-enabled');
     } else {
       document.body.classList.remove('ollama-enabled');
     }
-  }
+  });
 
   // 添加Groq API密钥切换功能
   if (toggleGroqPasswordBtn && groqApiKeyInput) {
@@ -160,17 +211,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }
 
+  // 音频转录复选框的额外逻辑：更新 CSS 类
   enableAudioTranscriptionCheckbox.addEventListener('change', () => {
     const enabled = enableAudioTranscriptionCheckbox.checked;
     updateAudioTranscriptionState(enabled);
-    autoSaveSettings();
   });
-
-  if (enableGroqProxyCheckbox) {
-    enableGroqProxyCheckbox.addEventListener('change', () => {
-      autoSaveSettings();
-    });
-  }
 
   // 加载已保存的设置
   const settings = await chrome.storage.local.get([
@@ -195,7 +240,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (settings.model) {
     modelInput.value = settings.model;
   }
-  if (settings.enableExtension) {
+  if (typeof settings.enableExtension === 'boolean') {
     enableExtensionCheckbox.checked = settings.enableExtension;
   }
   if (settings.enableLocalOllama) {
@@ -203,7 +248,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     // 使用CSS类而不是直接修改样式
     document.body.classList.add('ollama-enabled');
   }
-  if (settings.autoSkipAd) {
+  if (typeof settings.autoSkipAd === 'boolean') {
     autoSkipAdCheckbox.checked = settings.autoSkipAd;
   }
   if (settings.restrictedMode) {

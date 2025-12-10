@@ -41,7 +41,7 @@ class MessageHandler {
       sendResponse({ success: false, error: "Invalid message structure" });
       return false;
     } catch (error) {
-      console.error('【VideoAdGuard】[Background] 消息处理失败:', error);
+      console.warn('【VideoAdGuard】[Background] 消息处理失败:', error);
       sendResponse({
         success: false,
         error: error instanceof Error ? error.message : String(error)
@@ -76,7 +76,7 @@ class ApiRequestHandler {
       const data = await response.json();
       sendResponse({ success: true, data });
     } catch (error) {
-      console.error('【VideoAdGuard】[Background] API请求失败:', error);
+      console.warn('【VideoAdGuard】[Background] API请求失败:', error);
       sendResponse({
         success: false,
         error: error instanceof Error ? error.message : String(error)
@@ -131,7 +131,7 @@ class AudioTranscriptionHandler {
       console.log('【VideoAdGuard】[Background] 语音识别成功');
       sendResponse({ success: true, data: result });
     } catch (error) {
-      console.error('【VideoAdGuard】[Background] 语音识别失败:', error);
+      console.warn('【VideoAdGuard】[Background] 语音识别失败:', error);
       sendResponse({
         success: false,
         error: error instanceof Error ? error.message : String(error)
@@ -305,7 +305,7 @@ class AudioTranscriptionHandler {
         const err = error instanceof Error ? error : new Error(String(error));
         lastError = err;
 
-        console.error(`【VideoAdGuard】[Background] Groq${label}接口调用失败:`, err.message);
+        console.warn(`【VideoAdGuard】[Background] Groq${label}接口调用失败:`, err.message);
 
         if (!isLastAttempt) {
           console.warn('【VideoAdGuard】[Background] 准备使用Groq代理接口作为回退...');
