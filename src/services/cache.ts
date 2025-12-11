@@ -232,6 +232,33 @@ export class CacheService {
   }
 
   /**
+   * 更新缓存中的广告时间段（用于手动调整后的同步）
+   * @param bvid 视频BV号
+   * @param adTimeRanges 最新的广告时间段
+   */
+  public static async updateAdTimeRanges(bvid: string, adTimeRanges: number[][]): Promise<void> {
+    try {
+      const cache = await CacheService.getAllCache();
+      const cacheKey = CacheService.generateCacheKey(bvid);
+      const item = cache[cacheKey];
+
+      if (!item) {
+        console.log(`【VideoAdGuard】[Cache] 未找到 ${bvid} 的缓存，跳过广告区间更新`);
+        return;
+      }
+
+      item.adTimeRanges = adTimeRanges;
+      item.exist = adTimeRanges.length > 0 ? true : false;
+      item.createdAt = Date.now();
+
+      await CacheService.saveAllCache(cache);
+      console.log(`【VideoAdGuard】[Cache] 已同步 ${bvid} 的手动调整广告区间到缓存`);
+    } catch (error) {
+      console.warn('【VideoAdGuard】[Cache] 更新广告区间缓存失败:', error);
+    }
+  }
+
+  /**
    * 删除指定视频的缓存
    * @param bvid 视频BV号
    */

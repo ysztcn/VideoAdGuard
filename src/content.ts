@@ -182,6 +182,15 @@ class AdDetector {
     // console.log('【VideoAdGuard】同步广告区间:', this.adTimeRanges);
   }
 
+  private static async persistAdSegmentsToCache() {
+    try {
+      const bvid = this.getBvidFromUrl();
+      await CacheService.updateAdTimeRanges(bvid, this.adTimeRanges);
+    } catch (error) {
+      console.warn('【VideoAdGuard】手动调整广告区间未能同步缓存:', error);
+    }
+  }
+
 
   public static async analyze() {
     try {
@@ -765,6 +774,7 @@ class AdDetector {
           mode = null;
           // 操作结束后，同步数据到 adTimeRanges，这会立即影响 autoSkip 逻辑
           this.syncAdTimeRanges();
+          void this.persistAdSegmentsToCache();
         };
 
         marker.addEventListener('mousedown', onMouseDown);
